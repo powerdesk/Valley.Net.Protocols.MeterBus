@@ -6,56 +6,127 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Valley.Net.Bindings;
+using Valley.Net.Bindings.Tcp;
 using Valley.Net.Protocols.MeterBus.EN13757_2;
 using Valley.Net.Protocols.MeterBus.EN13757_3;
 
 namespace Valley.Net.Protocols.MeterBus
 {
+    //
+    // Packet formats:
+    //
+    // ACK: size = 1 byte
+    //
+    //   byte1: ack   = 0xE5
+    //
+    // SHORT: size = 5 byte
+    //
+    //   byte1: start   = 0x10
+    //   byte2: control = ...
+    //   byte3: address = ...
+    //   byte4: chksum  = ...
+    //   byte5: stop    = 0x16
+    //
+    // CONTROL: size = 9 byte
+    //
+    //   byte1: start1  = 0x68
+    //   byte2: length1 = ...
+    //   byte3: length2 = ...
+    //   byte4: start2  = 0x68
+    //   byte5: control = ...
+    //   byte6: address = ...
+    //   byte7: ctl.info= ...
+    //   byte8: chksum  = ...
+    //   byte9: stop    = 0x16
+    //
+    // LONG: size = N >= 9 byte
+    //
+    //   byte1: start1  = 0x68
+    //   byte2: length1 = ...
+    //   byte3: length2 = ...
+    //   byte4: start2  = 0x68
+    //   byte5: control = ...
+    //   byte6: address = ...
+    //   byte7: ctl.info= ...
+    //   byte8: data    = ...
+    //          ...     = ...
+    //   byteN-1: chksum  = ...
+    //   byteN: stop    = 0x16
+    //
+    //
+    //
+
     public sealed class MBusMaster
     {
-        private readonly IEndPointBinding _binding;
+        private readonly IEndPointBinding _binding = null;
+        private readonly AutoResetEvent _resetEvent = new AutoResetEvent(false);
+
+        private Packet _packet = null;
+        private TimeSpan _defaultTimeOut;
 
         public event EventHandler<MeterEventArgs> Meter;
+
+        public MBusMaster(string ipAddress, int port, int defaultTimeOut = 3)
+            : this(new TcpBinding(new IPEndPoint(IPAddress.Parse(ipAddress), port), new MeterbusFrameSerializer()))
+        {
+            _defaultTimeOut = TimeSpan.FromSeconds(defaultTimeOut);
+
+            _binding.PacketReceived += (sender, e) =>
+            {
+                switch (e.Packet)
+                {
+                    // response ok -> let waiting threads proceed
+                    case AckFrame frame:
+                        {
+                            Debug.WriteLine("AckFrame on thread: " + Thread.CurrentThread.ManagedThreadId);
+                            _resetEvent.Set();
+                        }
+                        break;
+                    case FixedDataLongFrame frame:
+                        {
+                            _packet = frame.ToPacket();
+                            _resetEvent.Set();
+                        }
+                        break;
+                    case VariableDataLongFrame frame:
+                        {
+                            _packet = frame.ToPacket();
+                            _resetEvent.Set();
+                        }
+                        break;
+                }
+            };
+
+            ((SocketBinding)_binding).Error += (sender, e) => Console.WriteLine("M-Bus error received: " + e.Error.Message);
+
+            ((SocketBinding)_binding).IoCompleted += (sender, e) => Console.WriteLine(e.SocketError.ToString());
+        }
 
         public MBusMaster(IEndPointBinding binding)
         {
             _binding = binding ?? throw new ArgumentNullException(nameof(binding));
         }
 
-        /// <summary>
-        /// Initialization of slave.
-        /// </summary>
-        /// <param name="address"></param>
-        /// <param name="timeout"></param>
-        /// <returns></returns>
-        public async Task<bool> Ping(byte address, TimeSpan timeout)
+        public async Task ConnectAsync()
         {
-            var resetEvent = new AutoResetEvent(false);
+            await _binding.ConnectAsync();
+        }
 
-            _binding.PacketReceived += (sender, e) =>
-            {
-                switch (e.Packet)
-                {
-                    case AckFrame frame:
-                        {
-                            resetEvent.Set();
-                        }
-                        break;
-                }
-            };
+        /// <summary>
+        /// Initialization of slave with SND_NKE
+        /// </summary>
+        /// <param name="address">Primary address</param>
+        /// <returns>true if </returns>
+        public async Task<bool> Ping(byte address)
+        {
+            await _binding.SendAsync(new ShortFrame((byte)ControlMask.SND_NKE, address));
+            return true;
+        }
 
-            try
-            {
-                await _binding.ConnectAsync();
-
-                await _binding.SendAsync(new ShortFrame((byte)ControlMask.SND_NKE, address));
-
-                return resetEvent.WaitOne(timeout);
-            }
-            finally
-            {
-                await _binding.DisconnectAsync();
-            }
+        public async Task<bool> SelectMeter(int address)
+        {
+            //LongFrame frame = new LongFrame()
+            return true;
         }
 
         public async Task SetMeterAddress(byte address, byte newaddress)
@@ -183,47 +254,17 @@ namespace Valley.Net.Protocols.MeterBus
         /// <returns></returns>
         public async Task<Packet> RequestData(byte address, TimeSpan timeout)
         {
-            var resetEvent = new AutoResetEvent(false);
+            _resetEvent.Reset();
 
-            Packet packet = null;
+            await _binding.SendAsync(new ShortFrame((byte)ControlMask.REQ_UD2, address)); // request data
 
-            _binding.PacketReceived += (sender, e) =>
-            {
-                switch (e.Packet)
-                {
-                    case FixedDataLongFrame frame:
-                        {
-                            packet = frame.ToPacket();
+            if (!_resetEvent.WaitOne(timeout))
+                throw new TimeoutException();
 
-                            resetEvent.Set();
-                        }
-                        break;
-                    case VariableDataLongFrame frame:
-                        {
-                            packet = frame.ToPacket();
-
-                            resetEvent.Set();
-                        }
-                        break;
-                }
-            };
-
-            try
-            {
-                await _binding.ConnectAsync();
-
-                await _binding.SendAsync(new ShortFrame((byte)ControlMask.REQ_UD2, address)); // request data
-
-                if (!resetEvent.WaitOne(timeout))
-                    throw new TimeoutException();
-            }
-            finally
-            {
-                await _binding.DisconnectAsync();
-            }
-
-            return packet;
+            return _packet;
         }
+
+
 
         public async Task Initialize(byte address)
         {

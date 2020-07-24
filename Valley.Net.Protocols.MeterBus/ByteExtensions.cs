@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using System.Runtime.CompilerServices;
 
 namespace Valley.Net.Protocols.MeterBus
 {
@@ -51,11 +52,11 @@ namespace Valley.Net.Protocols.MeterBus
             return source != null ? string.Join(separator, source.Select(x => x.ToString("x2"))) : null;
         }
 
-        public static string BCDDecode(this byte[] bytes, int length)
+        public static string BCDDecode(this byte[] bytes)
         {
             long val = 0;
 
-            for (int i = length; i > 0; i--)
+            for (int i = bytes.Length; i > 0; i--)
             {
                 val = (val * 10) + ((bytes[i - 1] >> 4) & 0xF);
                 val = (val * 10) + (bytes[i - 1] & 0xF);
@@ -67,6 +68,18 @@ namespace Valley.Net.Protocols.MeterBus
         public static string BCDToString(this byte[] bytes)
         {
             return string.Join(string.Empty, bytes.Reverse().Select(b => b.ToString("x2")));
+        }
+
+        // turns a standard byte into a BCD equivalent
+        public static byte DecToBcd(this byte self)
+        {
+            return (byte)(((self / 10) << 4) | (self % 10));
+        }
+
+        // turns a BCD-encoded byte back into a standard one
+        public static byte BcdToDec(this byte bcd)
+        {
+            return (byte)(((bcd >> 4) * 10) + (bcd & 0xF));
         }
     }
 }

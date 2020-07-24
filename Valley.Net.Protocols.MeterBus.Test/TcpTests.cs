@@ -43,7 +43,7 @@ namespace Valley.Net.Protocols.MeterBus.Test
 
             var master = new MBusMaster(binding);
 
-            var result = await master.Ping(0x0a, TimeSpan.FromSeconds(TIMEOUT_IN_SECONDS));
+            var result = await master.Ping(0x0a);
 
             Assert.IsTrue(result);
         }
